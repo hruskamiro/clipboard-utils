@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
+if [[ $# -eq 0 ]]; then
+  echo "usage: cob value [value...]" >&2
+  exit 2
+fi
+
+printf '%s\n' "$@" | "${script_dir}/co"

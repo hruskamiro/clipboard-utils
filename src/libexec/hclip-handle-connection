@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+state_dir="${HCLIP_STATE_DIR:-${XDG_STATE_HOME:-${HOME}/.local/state}/clipboard-utils/hclip}"
+token_file="${state_dir}/token"
+
+if [[ ! -f "$token_file" ]]; then
+  exit 1
+fi
+
+IFS= read -r provided_token || exit 1
+expected_token="$(cat "$token_file")"
+
+if [[ "$provided_token" != "$expected_token" ]]; then
+  exit 1
+fi
+
+if command -v wl-copy >/dev/null 2>&1; then
+  cat | wl-copy
+  exit 0
+fi
+
+if command -v xclip >/dev/null 2>&1; then
+  cat | xclip -selection clipboard -in
+  exit 0
+fi
+
+if command -v xsel >/dev/null 2>&1; then
+  cat | xsel --clipboard --input
+  exit 0
+fi
+
+exit 1

@@ -1,0 +1,766 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+CONFIG_DIR="${CLIPBOARD_UTILS_CONFIG_DIR:-${XDG_CONFIG_HOME:-${HOME}/.config}/clipboard-utils}"
+CONFIG_FILE="${CLIPBOARD_UTILS_CONFIG_FILE:-${CONFIG_DIR}/config}"
+HCLIP_STATE_DIR="${HCLIP_STATE_DIR:-${XDG_STATE_HOME:-${HOME}/.local/state}/clipboard-utils/hclip}"
+DEFAULT_BACKEND="local"
+
+print_usage() {
+  cat <<USAGE
+Usage:
+  co [options]
+  co config show
+  co config path
+  co config backend local|xclip|wl-copy|xsel|hclip
+  co config hclip HOST [PORT] SECRET
+  co remote export [--host-select] [HOST] [PORT] [FILE]
+  co remote export [--ssh SSH_TARGET|--ssh-select] [PORT] [FILE]
+  co remote import FILE
+
+Options:
+  -h, --help       Show this help message.
+  --print-config   Show the resolved clipboard configuration.
+
+Config:
+  ${CONFIG_FILE}
+
+Config values:
+  CLIPBOARD_BACKEND=local|xclip|wl-copy|xsel|hclip
+  HCLIP_HOST=host
+  HCLIP_PORT=23143
+  HCLIP_SECRET=secret
+
+Environment variables override values from the config file.
+USAGE
+}
+
+validate_backend() {
+  case "$1" in
+    local|xclip|wl-copy|xsel|hclip)
+      return 0
+      ;;
+    *)
+      echo "co: unknown backend '$1'." >&2
+      echo "Expected one of: local, xclip, wl-copy, xsel, hclip." >&2
+      return 1
+      ;;
+  esac
+}
+
+load_config() {
+  local env_backend="${CLIPBOARD_BACKEND:-}"
+  local env_hclip_host="${HCLIP_HOST:-}"
+  local env_hclip_port="${HCLIP_PORT:-}"
+  local env_hclip_secret="${HCLIP_SECRET:-}"
+
+  if [[ -f "${CONFIG_FILE}" ]]; then
+    # shellcheck source=/dev/null
+    source "${CONFIG_FILE}"
+  fi
+
+  CLIPBOARD_BACKEND="${env_backend:-${CLIPBOARD_BACKEND:-${DEFAULT_BACKEND}}}"
+  HCLIP_HOST="${env_hclip_host:-${HCLIP_HOST:-}}"
+  HCLIP_PORT="${env_hclip_port:-${HCLIP_PORT:-23143}}"
+  HCLIP_SECRET="${env_hclip_secret:-${HCLIP_SECRET:-}}"
+}
+
+ensure_config_file() {
+  mkdir -p "${CONFIG_DIR}"
+
+  if [[ -f "${CONFIG_FILE}" ]]; then
+    return 0
+  fi
+
+  umask 077
+  write_config "${DEFAULT_BACKEND}" "" "23143" ""
+}
+
+write_config() {
+  local backend="$1"
+  local hclip_host="$2"
+  local hclip_port="$3"
+  local hclip_secret="$4"
+  local tunnel_host="${5:-}"
+  local tunnel_local_port="${6:-}"
+  local tunnel_remote_host="${7:-}"
+  local tunnel_remote_port="${8:-}"
+  local tmp_file
+
+  mkdir -p "${CONFIG_DIR}"
+  tmp_file="$(mktemp "${CONFIG_DIR}/config.XXXXXX")"
+  chmod 600 "${tmp_file}" 2>/dev/null || true
+
+  {
+    printf '%s\n' '# clipboard-utils config'
+    printf '%s\n' '# CLIPBOARD_BACKEND can be: local, xclip, wl-copy, xsel, hclip'
+    printf 'CLIPBOARD_BACKEND=%q\n' "${backend}"
+    printf '\n'
+    printf '%s\n' '# Required only when CLIPBOARD_BACKEND=hclip'
+    printf 'HCLIP_HOST=%q\n' "${hclip_host}"
+    printf 'HCLIP_PORT=%q\n' "${hclip_port}"
+    printf 'HCLIP_SECRET=%q\n' "${hclip_secret}"
+    if [[ -n "${tunnel_host}" ]]; then
+      printf '\n'
+      printf '%s\n' '# Optional SSH tunnel metadata'
+      printf 'HCLIP_TUNNEL_HOST=%q\n' "${tunnel_host}"
+      printf 'HCLIP_TUNNEL_LOCAL_PORT=%q\n' "${tunnel_local_port}"
+      printf 'HCLIP_TUNNEL_REMOTE_HOST=%q\n' "${tunnel_remote_host}"
+      printf 'HCLIP_TUNNEL_REMOTE_PORT=%q\n' "${tunnel_remote_port}"
+    fi
+  } >"${tmp_file}"
+
+  mv "${tmp_file}" "${CONFIG_FILE}"
+}
+
+write_hclip_export() {
+  local host="$1"
+  local port="$2"
+  local secret="$3"
+  local output_file="${4:-}"
+  local tunnel_host="${5:-}"
+  local tmp_file
+
+  if [[ -z "${output_file}" ]]; then
+    {
+      printf '%s\n' '# clipboard-utils hclip remote config'
+      printf 'CLIPBOARD_BACKEND=%s\n' "hclip"
+      printf 'HCLIP_HOST=%s\n' "${host}"
+      printf 'HCLIP_PORT=%s\n' "${port}"
+      printf 'HCLIP_SECRET=%s\n' "${secret}"
+      if [[ -n "${tunnel_host}" ]]; then
+        printf '\n'
+        printf '%s\n' '# Optional SSH tunnel metadata'
+        printf 'HCLIP_TUNNEL_HOST=%s\n' "${tunnel_host}"
+        printf 'HCLIP_TUNNEL_LOCAL_PORT=%s\n' "${port}"
+        printf 'HCLIP_TUNNEL_REMOTE_HOST=%s\n' "127.0.0.1"
+        printf 'HCLIP_TUNNEL_REMOTE_PORT=%s\n' "${port}"
+      fi
+    }
+    return
+  fi
+
+  mkdir -p "$(dirname -- "${output_file}")"
+  tmp_file="$(mktemp "$(dirname -- "${output_file}")/.hclip-remote.XXXXXX")"
+  chmod 600 "${tmp_file}" 2>/dev/null || true
+
+  {
+    printf '%s\n' '# clipboard-utils hclip remote config'
+    printf 'CLIPBOARD_BACKEND=%s\n' "hclip"
+    printf 'HCLIP_HOST=%s\n' "${host}"
+    printf 'HCLIP_PORT=%s\n' "${port}"
+    printf 'HCLIP_SECRET=%s\n' "${secret}"
+    if [[ -n "${tunnel_host}" ]]; then
+      printf '\n'
+      printf '%s\n' '# Optional SSH tunnel metadata'
+      printf 'HCLIP_TUNNEL_HOST=%s\n' "${tunnel_host}"
+      printf 'HCLIP_TUNNEL_LOCAL_PORT=%s\n' "${port}"
+      printf 'HCLIP_TUNNEL_REMOTE_HOST=%s\n' "127.0.0.1"
+      printf 'HCLIP_TUNNEL_REMOTE_PORT=%s\n' "${port}"
+    fi
+  } >"${tmp_file}"
+
+  mv "${tmp_file}" "${output_file}"
+  echo "co: exported hclip config for ${host}:${port} to ${output_file}"
+}
+
+print_config() {
+  printf 'config_file=%s\n' "${CONFIG_FILE}"
+  printf 'backend=%s\n' "${CLIPBOARD_BACKEND}"
+  if [[ "${CLIPBOARD_BACKEND}" == "local" ]]; then
+    if command -v wl-copy >/dev/null 2>&1; then
+      printf 'local_backend=wl-copy\n'
+    elif command -v xclip >/dev/null 2>&1; then
+      printf 'local_backend=xclip\n'
+    elif command -v xsel >/dev/null 2>&1; then
+      printf 'local_backend=xsel\n'
+    else
+      printf 'local_backend=missing\n'
+    fi
+  fi
+  if [[ "${CLIPBOARD_BACKEND}" == "hclip" ]]; then
+    printf 'hclip_host=%s\n' "${HCLIP_HOST:-}"
+    printf 'hclip_port=%s\n' "${HCLIP_PORT:-23143}"
+    if [[ -n "${HCLIP_SECRET:-}" ]]; then
+      printf 'hclip_secret=set\n'
+    else
+      printf 'hclip_secret=missing\n'
+    fi
+  fi
+}
+
+set_backend() {
+  local backend="$1"
+
+  validate_backend "${backend}"
+  ensure_config_file
+  load_config
+  write_config "${backend}" "${HCLIP_HOST:-}" "${HCLIP_PORT:-23143}" "${HCLIP_SECRET:-}"
+  echo "co: backend set to ${backend}"
+}
+
+set_hclip() {
+  local host
+  local port
+  local secret
+
+  case $# in
+    2)
+      host="$1"
+      port="23143"
+      secret="$2"
+      ;;
+    3)
+      host="$1"
+      port="$2"
+      secret="$3"
+      ;;
+    *)
+      echo "usage: co config hclip HOST [PORT] SECRET" >&2
+      exit 2
+      ;;
+  esac
+
+  if [[ -z "${host}" || -z "${secret}" ]]; then
+    echo "co: hclip host and secret must not be empty." >&2
+    exit 2
+  fi
+
+  ensure_config_file
+  write_config "hclip" "${host}" "${port}" "${secret}"
+  echo "co: hclip backend configured for ${host}:${port}"
+}
+
+handle_config_command() {
+  local subcommand="${1:-show}"
+
+  case "${subcommand}" in
+    show)
+      load_config
+      print_config
+      ;;
+    path)
+      printf '%s\n' "${CONFIG_FILE}"
+      ;;
+    backend)
+      if [[ $# -ne 2 ]]; then
+        echo "usage: co config backend local|xclip|wl-copy|xsel|hclip" >&2
+        exit 2
+      fi
+      set_backend "$2"
+      ;;
+    hclip)
+      shift
+      set_hclip "$@"
+      ;;
+    -h|--help|help)
+      print_usage
+      ;;
+    *)
+      echo "co: unknown config command '${subcommand}'." >&2
+      print_usage >&2
+      exit 2
+      ;;
+  esac
+}
+
+remote_export() {
+  local host=""
+  local port="23143"
+  local output_file=""
+  local ssh_target=""
+  local ssh_select=0
+  local host_select=0
+  local token_file="${HCLIP_STATE_DIR}/token"
+  local secret
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --ssh)
+        ssh_target="${2:-}"
+        if [[ -z "${ssh_target}" ]]; then
+          echo "usage: co remote export --ssh SSH_TARGET [PORT] [FILE]" >&2
+          exit 2
+        fi
+        host="127.0.0.1"
+        shift 2
+        ;;
+      --ssh-select)
+        ssh_select=1
+        host="127.0.0.1"
+        shift
+        ;;
+      --host-select)
+        host_select=1
+        shift
+        ;;
+      *)
+        break
+        ;;
+    esac
+  done
+
+  case $# in
+    0)
+      ;;
+    1)
+      if [[ "$1" =~ ^[0-9]+$ ]]; then
+        port="$1"
+      elif [[ "$1" == */* || "$1" == *.conf ]]; then
+        output_file="$1"
+      else
+        host="$1"
+      fi
+      ;;
+    2)
+      if [[ "$1" =~ ^[0-9]+$ ]]; then
+        port="$1"
+        output_file="$2"
+      elif [[ "$2" =~ ^[0-9]+$ ]]; then
+        host="$1"
+        port="$2"
+      else
+        host="$1"
+        output_file="$2"
+      fi
+      ;;
+    3)
+      host="$1"
+      port="$2"
+      output_file="$3"
+      ;;
+    *)
+      echo "usage: co remote export [HOST] [PORT] [FILE]" >&2
+      exit 2
+      ;;
+  esac
+
+  if [[ "${host_select}" -eq 1 ]]; then
+    if [[ -n "${ssh_target}" || "${ssh_select}" -eq 1 ]]; then
+      echo "co: --host-select cannot be combined with --ssh or --ssh-select." >&2
+      exit 2
+    fi
+    host="$(select_export_host)"
+  elif [[ -z "${host}" ]]; then
+    host="$(resolve_export_host)"
+  fi
+
+  if [[ "${ssh_select}" -eq 1 ]]; then
+    ssh_target="$(select_ssh_target)"
+  fi
+
+  if [[ -z "${host}" ]]; then
+    echo "co: could not determine export host." >&2
+    echo "Pass it explicitly, or set HCLIP_EXPORT_HOST." >&2
+    exit 1
+  fi
+
+  if [[ ! "${port}" =~ ^[0-9]+$ ]]; then
+    echo "co: hclip port must be numeric." >&2
+    exit 2
+  fi
+
+  if [[ ! -f "${token_file}" ]]; then
+    echo "co: hclip secret not found at ${token_file}." >&2
+    echo "Start the receiver first with: hclip-start ${port}" >&2
+    exit 1
+  fi
+
+  secret="$(cat "${token_file}")"
+  if [[ -z "${secret}" ]]; then
+    echo "co: hclip secret file is empty: ${token_file}" >&2
+    exit 1
+  fi
+
+  write_hclip_export "${host}" "${port}" "${secret}" "${output_file}" "${ssh_target}"
+}
+
+add_candidate() {
+  local candidate="$1"
+  local existing
+
+  [[ -n "${candidate}" ]] || return 0
+
+  for existing in "${SSH_CANDIDATES[@]}"; do
+    if [[ "${existing}" == "${candidate}" ]]; then
+      return 0
+    fi
+  done
+
+  SSH_CANDIDATES+=("${candidate}")
+}
+
+collect_ssh_candidates() {
+  local short_host=""
+  local fqdn_host=""
+  local detected_host=""
+  local current_user="${USER:-}"
+
+  SSH_CANDIDATES=()
+
+  short_host="$(hostname 2>/dev/null || true)"
+  fqdn_host="$(hostname -f 2>/dev/null || true)"
+  detected_host="$(resolve_export_host 2>/dev/null || true)"
+
+  add_candidate "${fqdn_host}"
+  add_candidate "${short_host}"
+  add_candidate "${detected_host}"
+
+  if [[ -n "${current_user}" ]]; then
+    if [[ -n "${fqdn_host}" ]]; then
+      add_candidate "${current_user}@${fqdn_host}"
+    fi
+    if [[ -n "${short_host}" ]]; then
+      add_candidate "${current_user}@${short_host}"
+    fi
+    if [[ -n "${detected_host}" ]]; then
+      add_candidate "${current_user}@${detected_host}"
+    fi
+  fi
+}
+
+select_ssh_target() {
+  local choice
+  local custom_index
+  local selected
+  local i
+
+  collect_ssh_candidates
+  custom_index=$((${#SSH_CANDIDATES[@]} + 1))
+
+  echo "Choose SSH target for senders:" >&2
+  for i in "${!SSH_CANDIDATES[@]}"; do
+    printf '  %s. %s\n' "$((i + 1))" "${SSH_CANDIDATES[$i]}" >&2
+  done
+  printf '  %s. Custom\n' "${custom_index}" >&2
+  printf 'Selection: ' >&2
+  IFS= read -r choice
+
+  if [[ "${choice}" =~ ^[0-9]+$ ]]; then
+    if (( choice >= 1 && choice <= ${#SSH_CANDIDATES[@]} )); then
+      selected="${SSH_CANDIDATES[$((choice - 1))]}"
+    elif (( choice == custom_index )); then
+      printf 'SSH target: ' >&2
+      IFS= read -r selected
+    else
+      echo "co: invalid selection." >&2
+      exit 2
+    fi
+  else
+    selected="${choice}"
+  fi
+
+  if [[ -z "${selected}" ]]; then
+    echo "co: SSH target must not be empty." >&2
+    exit 2
+  fi
+
+  echo "co: SSH target selected: ${selected}" >&2
+  printf '%s\n' "${selected}"
+}
+
+collect_host_candidates() {
+  local short_host=""
+  local fqdn_host=""
+  local detected_host=""
+  local ip_addr=""
+
+  HOST_CANDIDATES=()
+
+  short_host="$(hostname 2>/dev/null || true)"
+  fqdn_host="$(hostname -f 2>/dev/null || true)"
+  detected_host="$(resolve_export_host 2>/dev/null || true)"
+
+  add_host_candidate "${detected_host}"
+  add_host_candidate "${fqdn_host}"
+  add_host_candidate "${short_host}"
+
+  if command -v ip >/dev/null 2>&1; then
+    while IFS= read -r ip_addr; do
+      add_host_candidate "${ip_addr}"
+    done < <(ip -o -4 addr show scope global 2>/dev/null | awk '{ split($4, parts, "/"); print parts[1] }')
+  fi
+}
+
+add_host_candidate() {
+  local candidate="$1"
+  local existing
+
+  [[ -n "${candidate}" ]] || return 0
+
+  for existing in "${HOST_CANDIDATES[@]}"; do
+    if [[ "${existing}" == "${candidate}" ]]; then
+      return 0
+    fi
+  done
+
+  HOST_CANDIDATES+=("${candidate}")
+}
+
+select_export_host() {
+  local choice
+  local custom_index
+  local selected
+  local i
+
+  collect_host_candidates
+  custom_index=$((${#HOST_CANDIDATES[@]} + 1))
+
+  echo "Choose export address for senders:" >&2
+  for i in "${!HOST_CANDIDATES[@]}"; do
+    printf '  %s. %s\n' "$((i + 1))" "${HOST_CANDIDATES[$i]}" >&2
+  done
+  printf '  %s. Custom\n' "${custom_index}" >&2
+  printf 'Selection: ' >&2
+  IFS= read -r choice
+
+  if [[ "${choice}" =~ ^[0-9]+$ ]]; then
+    if (( choice >= 1 && choice <= ${#HOST_CANDIDATES[@]} )); then
+      selected="${HOST_CANDIDATES[$((choice - 1))]}"
+    elif (( choice == custom_index )); then
+      printf 'Export address: ' >&2
+      IFS= read -r selected
+    else
+      echo "co: invalid selection." >&2
+      exit 2
+    fi
+  else
+    selected="${choice}"
+  fi
+
+  if [[ -z "${selected}" ]]; then
+    echo "co: export address must not be empty." >&2
+    exit 2
+  fi
+
+  echo "co: export address selected: ${selected}" >&2
+  printf '%s\n' "${selected}"
+}
+
+resolve_export_host() {
+  local route_line
+
+  if [[ -n "${HCLIP_EXPORT_HOST:-}" ]]; then
+    printf '%s\n' "${HCLIP_EXPORT_HOST}"
+    return 0
+  fi
+
+  load_config
+  if [[ -n "${HCLIP_HOST:-}" ]]; then
+    printf '%s\n' "${HCLIP_HOST}"
+    return 0
+  fi
+
+  if command -v ip >/dev/null 2>&1; then
+    route_line="$(ip route get 1.1.1.1 2>/dev/null || true)"
+    if [[ "${route_line}" =~ src[[:space:]]+([^[:space:]]+) ]]; then
+      printf '%s\n' "${BASH_REMATCH[1]}"
+      return 0
+    fi
+  fi
+
+  return 1
+}
+
+remote_import() {
+  local input_file="${1:-}"
+  local imported_backend=""
+  local imported_host=""
+  local imported_port=""
+  local imported_secret=""
+  local imported_tunnel_host=""
+  local imported_tunnel_local_port=""
+  local imported_tunnel_remote_host=""
+  local imported_tunnel_remote_port=""
+  local key
+  local value
+
+  if [[ $# -ne 1 || -z "${input_file}" ]]; then
+    echo "usage: co remote import FILE" >&2
+    exit 2
+  fi
+
+  if [[ ! -f "${input_file}" ]]; then
+    echo "co: import file not found: ${input_file}" >&2
+    exit 1
+  fi
+
+  while IFS='=' read -r key value; do
+    [[ -n "${key}" ]] || continue
+    [[ "${key}" != \#* ]] || continue
+    case "${key}" in
+      CLIPBOARD_BACKEND)
+        imported_backend="${value}"
+        ;;
+      HCLIP_HOST)
+        imported_host="${value}"
+        ;;
+      HCLIP_PORT)
+        imported_port="${value}"
+        ;;
+      HCLIP_SECRET)
+        imported_secret="${value}"
+        ;;
+      HCLIP_TUNNEL_HOST)
+        imported_tunnel_host="${value}"
+        ;;
+      HCLIP_TUNNEL_LOCAL_PORT)
+        imported_tunnel_local_port="${value}"
+        ;;
+      HCLIP_TUNNEL_REMOTE_HOST)
+        imported_tunnel_remote_host="${value}"
+        ;;
+      HCLIP_TUNNEL_REMOTE_PORT)
+        imported_tunnel_remote_port="${value}"
+        ;;
+    esac
+  done <"${input_file}"
+
+  if [[ "${imported_backend}" != "hclip" ]]; then
+    echo "co: import file is not an hclip config." >&2
+    exit 1
+  fi
+
+  if [[ -z "${imported_host}" || -z "${imported_secret}" ]]; then
+    echo "co: import file must include HCLIP_HOST and HCLIP_SECRET." >&2
+    exit 1
+  fi
+
+  if [[ -z "${imported_port}" ]]; then
+    imported_port="23143"
+  fi
+
+  if [[ ! "${imported_port}" =~ ^[0-9]+$ ]]; then
+    echo "co: imported HCLIP_PORT must be numeric." >&2
+    exit 1
+  fi
+
+  ensure_config_file
+  write_config "hclip" "${imported_host}" "${imported_port}" "${imported_secret}" \
+    "${imported_tunnel_host}" "${imported_tunnel_local_port}" \
+    "${imported_tunnel_remote_host}" "${imported_tunnel_remote_port}"
+  echo "co: imported hclip config for ${imported_host}:${imported_port}"
+}
+
+handle_remote_command() {
+  local subcommand="${1:-}"
+
+  case "${subcommand}" in
+    export)
+      shift
+      remote_export "$@"
+      ;;
+    import)
+      shift
+      remote_import "$@"
+      ;;
+    -h|--help|help)
+      print_usage
+      ;;
+    *)
+      echo "co: unknown remote command '${subcommand}'." >&2
+      print_usage >&2
+      exit 2
+      ;;
+  esac
+}
+
+copy_local() {
+  local command_name="$1"
+  shift
+
+  if ! command -v "${command_name}" >/dev/null 2>&1; then
+    echo "co: '${command_name}' is not installed or not on PATH." >&2
+    exit 1
+  fi
+
+  "$command_name" "$@"
+}
+
+copy_local_auto() {
+  if command -v wl-copy >/dev/null 2>&1; then
+    wl-copy
+    return
+  fi
+
+  if command -v xclip >/dev/null 2>&1; then
+    xclip -selection clipboard -in
+    return
+  fi
+
+  if command -v xsel >/dev/null 2>&1; then
+    xsel --clipboard --input
+    return
+  fi
+
+  echo "co: no local clipboard backend found." >&2
+  echo "Install wl-copy, xclip, or xsel; or configure remote hclip with:" >&2
+  echo "  co config hclip HOST [PORT] SECRET" >&2
+  exit 1
+}
+
+copy_hclip() {
+  if [[ -z "${HCLIP_HOST:-}" || -z "${HCLIP_SECRET:-}" ]]; then
+    echo "co: hclip requires HCLIP_HOST and HCLIP_SECRET." >&2
+    echo "Set them in ${CONFIG_FILE}, or export them in the environment." >&2
+    exit 1
+  fi
+
+  {
+    printf '%s\n' "${HCLIP_SECRET}"
+    cat
+  } >"/dev/tcp/${HCLIP_HOST}/${HCLIP_PORT:-23143}"
+}
+
+case "${1:-}" in
+  -h|--help)
+    print_usage
+    exit 0
+    ;;
+  --print-config)
+    load_config
+    print_config
+    exit 0
+    ;;
+  config)
+    shift
+    handle_config_command "$@"
+    exit 0
+    ;;
+  remote)
+    shift
+    handle_remote_command "$@"
+    exit 0
+    ;;
+esac
+
+if [[ $# -gt 0 ]]; then
+  echo "co: unexpected argument: $1" >&2
+  print_usage >&2
+  exit 2
+fi
+
+load_config
+
+case "${CLIPBOARD_BACKEND}" in
+  local)
+    copy_local_auto
+    ;;
+  xclip)
+    copy_local xclip -selection clipboard -in
+    ;;
+  wl-copy)
+    copy_local wl-copy
+    ;;
+  xsel)
+    copy_local xsel --clipboard --input
+    ;;
+  hclip)
+    copy_hclip
+    ;;
+  *)
+    echo "co: unknown CLIPBOARD_BACKEND '${CLIPBOARD_BACKEND}'." >&2
+    echo "Expected one of: local, xclip, wl-copy, xsel, hclip." >&2
+    exit 1
+    ;;
+esac

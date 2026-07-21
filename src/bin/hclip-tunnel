@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+config_dir="${CLIPBOARD_UTILS_CONFIG_DIR:-${XDG_CONFIG_HOME:-${HOME}/.config}/clipboard-utils}"
+config_file="${CLIPBOARD_UTILS_CONFIG_FILE:-${config_dir}/config}"
+state_dir="${HCLIP_STATE_DIR:-${XDG_STATE_HOME:-${HOME}/.local/state}/clipboard-utils/hclip}"
+control_socket="${HCLIP_TUNNEL_CONTROL_SOCKET:-${state_dir}/tunnel-ssh.sock}"
+
+usage() {
+  cat <<USAGE
+Usage:
+  hclip-tunnel print-command
+  hclip-tunnel start [--foreground]
+  hclip-tunnel stop
+  hclip-tunnel status
+  hclip-tunnel restart
+
+Reads SSH tunnel metadata from:
+  ${config_file}
+USAGE
+}
+
+load_config() {
+  if [[ ! -f "${config_file}" ]]; then
+    echo "hclip-tunnel: config not found: ${config_file}" >&2
+    exit 1
+  fi
+
+  # shellcheck source=/dev/null
+  source "${config_file}"
+}
+
+build_ssh_args() {
+  TUNNEL_HOST="${HCLIP_TUNNEL_HOST:-}"
+  TUNNEL_LOCAL_PORT="${HCLIP_TUNNEL_LOCAL_PORT:-${HCLIP_PORT:-23143}}"
+  TUNNEL_REMOTE_HOST="${HCLIP_TUNNEL_REMOTE_HOST:-127.0.0.1}"
+  TUNNEL_REMOTE_PORT="${HCLIP_TUNNEL_REMOTE_PORT:-${HCLIP_PORT:-23143}}"
+
+  if [[ -z "${TUNNEL_HOST}" ]]; then
+    echo "hclip-tunnel: HCLIP_TUNNEL_HOST is missing from ${config_file}" >&2
+    exit 1
+  fi
+
+  SSH_ARGS=(
+    -N
+    -o ExitOnForwardFailure=yes
+    -L "${TUNNEL_LOCAL_PORT}:${TUNNEL_REMOTE_HOST}:${TUNNEL_REMOTE_PORT}"
+    "${TUNNEL_HOST}"
+  )
+  SSH_MANAGED_ARGS=(
+    -f
+    -M
+    -S "${control_socket}"
+    "${SSH_ARGS[@]}"
+  )
+}
+
+quote_managed_command() {
+  local arg
+
+  printf 'ssh'
+  for arg in "${SSH_MANAGED_ARGS[@]}"; do
+    printf ' %q' "${arg}"
+  done
+  printf '\n'
+}
+
+check_tunnel() {
+  ssh -S "${control_socket}" -O check "${TUNNEL_HOST}" >/dev/null 2>&1
+}
+
+start_tunnel() {
+  local foreground=0
+
+  shift
+  if [[ "${1:-}" == "--foreground" ]]; then
+    foreground=1
+    shift
+  fi
+  if [[ $# -gt 0 ]]; then
+    echo "hclip-tunnel: unexpected argument: $1" >&2
+    usage >&2
+    exit 2
+  fi
+
+  if [[ "${foreground}" -eq 1 ]]; then
+    exec ssh "${SSH_ARGS[@]}"
+  fi
+
+  mkdir -p "${state_dir}"
+  if check_tunnel; then
+    echo "hclip-tunnel: already running for ${TUNNEL_HOST} on local port ${TUNNEL_LOCAL_PORT}"
+    return 0
+  fi
+
+  ssh "${SSH_MANAGED_ARGS[@]}"
+  echo "hclip-tunnel: started for ${TUNNEL_HOST} on local port ${TUNNEL_LOCAL_PORT}"
+}
+
+stop_tunnel() {
+  if check_tunnel; then
+    ssh -S "${control_socket}" -O exit "${TUNNEL_HOST}" >/dev/null
+    echo "hclip-tunnel: stopped"
+  else
+    echo "hclip-tunnel: not running"
+  fi
+}
+
+status_tunnel() {
+  if check_tunnel; then
+    echo "hclip-tunnel: running for ${TUNNEL_HOST} on local port ${TUNNEL_LOCAL_PORT}"
+  else
+    echo "hclip-tunnel: not running"
+    exit 1
+  fi
+}
+
+load_config
+build_ssh_args
+
+case "${1:-}" in
+  print-command|show-command)
+    quote_managed_command
+    ;;
+  start)
+    start_tunnel "$@"
+    ;;
+  stop)
+    stop_tunnel
+    ;;
+  status)
+    status_tunnel
+    ;;
+  restart)
+    stop_tunnel
+    start_tunnel start
+    ;;
+  -h|--help|help)
+    usage
+    ;;
+  *)
+    echo "hclip-tunnel: unknown command '${1:-}'." >&2
+    usage >&2
+    exit 2
+    ;;
+esac

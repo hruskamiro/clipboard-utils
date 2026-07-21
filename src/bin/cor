@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+full=0
+
+usage() {
+  cat <<USAGE
+Usage:
+  cor [-f|--full] command [args...]
+
+Options:
+  -f, --full    Copy an annotated report with hostname, time, pwd, command, and status.
+  -h, --help    Show this help.
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -f|--full)
+      full=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --)
+      shift
+      break
+      ;;
+    -*)
+      echo "cor: unknown option: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+if [[ $# -eq 0 ]]; then
+  usage >&2
+  exit 2
+fi
+
+tmp_file="$(mktemp)"
+copy_file="$(mktemp)"
+trap 'rm -f "${tmp_file}" "${copy_file}"' EXIT
+
+format_command() {
+  local first=1
+  local arg
+
+  for arg in "$@"; do
+    if [[ "${first}" -eq 0 ]]; then
+      printf ' '
+    fi
+    printf '%q' "${arg}"
+    first=0
+  done
+}
+
+set +e
+"$@" 2>&1 | tee "${tmp_file}"
+command_status="${PIPESTATUS[0]}"
+set -e
+
+if [[ "${full}" -eq 1 ]]; then
+  {
+    printf 'command: %s\n' "$(format_command "$@")"
+    printf 'host: %s\n' "$(hostname 2>/dev/null || printf unknown)"
+    printf 'time: %s\n' "$(date -Is 2>/dev/null || date)"
+    printf 'directory: %s\n' "${PWD}"
+    printf 'status: %s\n' "${command_status}"
+    printf '\n'
+    printf '%s\n' 'output:'
+    cat "${tmp_file}"
+  } >"${copy_file}"
+else
+  cp "${tmp_file}" "${copy_file}"
+fi
+
+set +e
+"${script_dir}/co" <"${copy_file}"
+clipboard_status="$?"
+set -e
+
+if [[ "${command_status}" -ne 0 ]]; then
+  exit "${command_status}"
+fi
+
+exit "${clipboard_status}"

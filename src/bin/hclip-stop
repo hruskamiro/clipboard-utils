@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+state_dir="${HCLIP_STATE_DIR:-${XDG_STATE_HOME:-${HOME}/.local/state}/clipboard-utils/hclip}"
+listener_pid_file="${state_dir}/server.pid"
+
+if [[ -f "$listener_pid_file" ]]; then
+  listener_pid="$(cat "$listener_pid_file")"
+  kill "$listener_pid" 2>/dev/null || true
+  rm -f "$listener_pid_file"
+fi
+
+echo "hclip: stopped"

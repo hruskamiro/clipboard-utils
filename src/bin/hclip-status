@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+state_dir="${HCLIP_STATE_DIR:-${XDG_STATE_HOME:-${HOME}/.local/state}/clipboard-utils/hclip}"
+listener_pid_file="${state_dir}/server.pid"
+token_file="${state_dir}/token"
+
+listener_status="down"
+token_status="missing"
+
+if [[ -f "$listener_pid_file" ]]; then
+  listener_pid="$(cat "$listener_pid_file")"
+  if kill -0 "$listener_pid" 2>/dev/null; then
+    listener_status="up (pid ${listener_pid})"
+  fi
+fi
+
+if [[ -f "$token_file" ]]; then
+  token_status="$token_file"
+fi
+
+printf 'server: %s\ntoken: %s\n' "$listener_status" "$token_status"

@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+full=0
+
+usage() {
+  cat <<USAGE
+Usage:
+  coc [-f|--full] FILE
+
+Options:
+  -f, --full    Copy an annotated report with file metadata and content.
+  -h, --help    Show this help.
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -f|--full)
+      full=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --)
+      shift
+      break
+      ;;
+    -*)
+      echo "coc: unknown option: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+if [[ $# -ne 1 ]]; then
+  usage >&2
+  exit 2
+fi
+
+file="$1"
+
+if [[ ! -f "${file}" ]]; then
+  echo "coc: file not found: ${file}" >&2
+  exit 1
+fi
+
+if [[ ! -r "${file}" ]]; then
+  echo "coc: file is not readable: ${file}" >&2
+  exit 1
+fi
+
+copy_file="$(mktemp)"
+trap 'rm -f "${copy_file}"' EXIT
+
+if [[ "${full}" -eq 1 ]]; then
+  full_path="$(cd -- "$(dirname -- "${file}")" && pwd)/$(basename -- "${file}")"
+  size_bytes="$(wc -c <"${file}" | awk '{ print $1 }')"
+  line_count="$(wc -l <"${file}" | awk '{ print $1 }')"
+
+  {
+    printf 'file: %s\n' "${file}"
+    printf 'full_path: %s\n' "${full_path}"
+    printf 'basename: %s\n' "$(basename -- "${file}")"
+    printf 'host: %s\n' "$(hostname 2>/dev/null || printf unknown)"
+    printf 'time: %s\n' "$(date -Is 2>/dev/null || date)"
+    printf 'directory: %s\n' "${PWD}"
+    printf 'size_bytes: %s\n' "${size_bytes}"
+    printf 'lines: %s\n' "${line_count}"
+    printf '\n'
+    printf '%s\n' 'content:'
+    cat "${file}"
+  } >"${copy_file}"
+else
+  cp "${file}" "${copy_file}"
+fi
+
+"${script_dir}/co" <"${copy_file}"

@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_path="${BASH_SOURCE[0]}"
+if command -v readlink >/dev/null 2>&1; then
+  script_path="$(readlink -f -- "${script_path}")"
+fi
+script_dir="$(cd -- "$(dirname -- "${script_path}")" && pwd)"
+libexec_dir="$(cd -- "${script_dir}/../libexec" && pwd)"
+state_dir="${HCLIP_STATE_DIR:-${XDG_STATE_HOME:-${HOME}/.local/state}/clipboard-utils/hclip}"
+listener_pid_file="${state_dir}/server.pid"
+token_file="${state_dir}/token"
+foreground=0
+port="${HCLIP_PORT:-23143}"
+bind_host="${HCLIP_BIND:-127.0.0.1}"
+
+usage() {
+  cat <<USAGE
+Usage:
+  hclip-start [--foreground] [--bind HOST] [PORT]
+
+Options:
+  --bind HOST     Bind address. Defaults to ${bind_host}.
+  --foreground    Run socat in the foreground for a service manager.
+  -h, --help      Show this help.
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --foreground)
+      foreground=1
+      shift
+      ;;
+    --bind)
+      bind_host="${2:?--bind requires a host}"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      if [[ "$1" =~ ^[0-9]+$ ]]; then
+        port="$1"
+        shift
+      else
+        echo "hclip: unexpected argument: $1" >&2
+        usage >&2
+        exit 2
+      fi
+      ;;
+  esac
+done
+
+mkdir -p "$state_dir"
+
+if [[ "${foreground}" -eq 0 && -f "$listener_pid_file" ]]; then
+  listener_pid="$(cat "$listener_pid_file")"
+  if kill -0 "$listener_pid" 2>/dev/null; then
+    echo "hclip: server already running on port ${port}"
+    exit 0
+  fi
+  rm -f "$listener_pid_file"
+fi
+
+if [[ ! -s "$token_file" ]]; then
+  if command -v hclip-secret >/dev/null 2>&1; then
+    HCLIP_STATE_DIR="${state_dir}" hclip-secret generate
+  elif [[ -x "${script_dir}/hclip-secret" ]]; then
+    HCLIP_STATE_DIR="${state_dir}" "${script_dir}/hclip-secret" generate
+  else
+    umask 077
+    openssl rand -hex 32 >"$token_file"
+    echo "hclip: generated secret in ${token_file}"
+  fi
+fi
+
+if [[ "${foreground}" -eq 1 ]]; then
+  echo "hclip: listening on ${bind_host}:${port}"
+  exec socat "TCP-LISTEN:${port},bind=${bind_host},reuseaddr,fork" EXEC:"${libexec_dir}/hclip-handle-connection"
+fi
+
+nohup socat "TCP-LISTEN:${port},bind=${bind_host},reuseaddr,fork" EXEC:"${libexec_dir}/hclip-handle-connection" >/dev/null 2>&1 &
+listener_pid=$!
+echo "$listener_pid" >"$listener_pid_file"
+
+echo "hclip: listening on ${bind_host}:${port}"
