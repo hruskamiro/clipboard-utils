@@ -29,11 +29,23 @@ actual clipboard.
 
 ## Install
 
-Install on every machine where you want to run `co` commands:
+Choose a directory where you keep local tools, for example:
 
 ```bash
+mkdir -p ~/tools
+cd ~/tools
+```
+
+Then clone the repo and run the installer on every machine where you want to
+run `co` commands:
+
+```bash
+git clone https://github.com/hruskamiro/clipboard-utils.git
+cd clipboard-utils
 ./install.sh
 ```
+
+Keep the checkout in place because the installer creates symlinks to it.
 
 This creates command symlinks in `~/.local/bin` and config at:
 
