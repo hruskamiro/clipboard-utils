@@ -49,6 +49,9 @@ tmp_file="$(mktemp)"
 copy_file="$(mktemp)"
 trap 'rm -f "${tmp_file}" "${copy_file}"' EXIT
 
+interrupted=0
+trap 'interrupted=1' INT
+
 format_command() {
   local first=1
   local arg
@@ -64,8 +67,17 @@ format_command() {
 
 set +e
 "$@" 2>&1 | tee "${tmp_file}"
-command_status="${PIPESTATUS[0]}"
+pipeline_status="${PIPESTATUS[0]}"
 set -e
+
+if [[ "${interrupted}" -eq 1 ]]; then
+  command_status=130
+else
+  command_status="${pipeline_status}"
+fi
+
+# A second Ctrl-C should still be able to abort report generation or copying.
+trap - INT
 
 if [[ "${full}" -eq 1 ]]; then
   {
